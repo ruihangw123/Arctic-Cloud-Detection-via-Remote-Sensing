@@ -1,0 +1,5 @@
+name = "Ruihang Wang"
+SID = "3038384169"
+email = "ruihang_wang@berkeley.edu"
+github_name = "ruihangw123"
+
