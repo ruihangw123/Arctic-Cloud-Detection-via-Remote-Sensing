@@ -20,6 +20,7 @@ from clean import (
     derive_ciTBI,
     get_analysis_cohort,
 )
+from labels import get_label
 
 
 def analyze_missingness(df: pd.DataFrame, out_path: Path | None = None) -> pd.DataFrame:
@@ -127,7 +128,7 @@ def main() -> None:
     top_miss = missing_report.head(20)
     axes[0, 0].barh(range(len(top_miss)), top_miss["pct_missing"], color="steelblue", alpha=0.8)
     axes[0, 0].set_yticks(range(len(top_miss)))
-    axes[0, 0].set_yticklabels(top_miss["variable"], fontsize=8)
+    axes[0, 0].set_yticklabels([get_label(v) for v in top_miss["variable"]], fontsize=8)
     axes[0, 0].set_xlabel("% Missing")
     axes[0, 0].set_title("Missingness by Variable (Top 20)")
     axes[0, 0].invert_yaxis()
@@ -209,8 +210,9 @@ def main() -> None:
     im = ax.imshow(corr, cmap="RdBu_r", vmin=-0.5, vmax=0.5, aspect="auto")
     ax.set_xticks(range(len(avail_num)))
     ax.set_yticks(range(len(avail_num)))
-    ax.set_xticklabels(avail_num, rotation=45, ha="right")
-    ax.set_yticklabels(avail_num)
+    labels_num = [get_label(v) for v in avail_num]
+    ax.set_xticklabels(labels_num, rotation=45, ha="right")
+    ax.set_yticklabels(labels_num)
     plt.colorbar(im, ax=ax, label="Correlation")
     ax.set_title("Correlation among PECARN variables")
     plt.tight_layout()
@@ -256,6 +258,7 @@ def main() -> None:
     ]
     avail = [v for v in pecarn_vars if v in cohort.columns]
     miss_pct = cohort[avail].isna().sum() / len(cohort) * 100
+    miss_pct.index = [get_label(v) for v in miss_pct.index]
     fig, ax = plt.subplots(figsize=(7, 5))
     miss_pct.plot(kind="barh", ax=ax, color="steelblue", alpha=0.8)
     ax.set_xlabel("% Missing in analysis cohort")
