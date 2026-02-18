@@ -1,6 +1,6 @@
 # Fdb version 4
-["pdflatex"] 1771041972.77599 "/Users/ruihangwang/Desktop/Berkeley/Stat 214/lab1/report/lab1-report.tex" "lab1-report.pdf" "lab1-report" 1771041973.13631 0
-  "/Users/ruihangwang/Desktop/Berkeley/Stat 214/lab1/report/lab1-report.tex" 1771041332.19822 42495 4c059ee91ea2059e29286ac1f5e7a21b ""
+["pdflatex"] 1771455976.10764 "/Users/ruihangwang/Desktop/Berkeley/Stat 214/lab1/report/lab1-report.tex" "lab1-report.pdf" "lab1-report" 1771455976.52822 0
+  "/Users/ruihangwang/Desktop/Berkeley/Stat 214/lab1/report/lab1-report.tex" 1771455975.95368 42621 2b72d9d5209ef97114040f9019e3d3a5 ""
   "/usr/local/texlive/2025/texmf-dist/fonts/map/fontname/texfonts.map" 1577235249 3524 cb3e574dea2d1052e39280babc910dc8 ""
   "/usr/local/texlive/2025/texmf-dist/fonts/tfm/public/cm/cmbx10.tfm" 1136768653 1328 c834bbb027764024c09d3d2bf908b5f0 ""
   "/usr/local/texlive/2025/texmf-dist/fonts/tfm/public/cm/cmbx12.tfm" 1136768653 1324 c910af8c371558dc20f2d7822f66fe64 ""
@@ -88,9 +88,9 @@
   "figures/risk_factor_accumulation.pdf" 1771041240.32125 16282 8a83851e8376bcc76385befebf704734 ""
   "figures/selection_bias.pdf" 1771041240.10058 17954 477ebb0a37a23112ff3a720e925d857b ""
   "figures/stability_check.pdf" 1771041240.28529 17313 613d58a863f1f29c639667444864c913 ""
-  "lab1-report.aux" 1771041973.10304 10875 4d49f5f4156dd80fb1b0f609af39f957 "pdflatex"
-  "lab1-report.out" 1771041973.10384 3542 25af4908261b03d6720639a23d38bfdb "pdflatex"
-  "lab1-report.tex" 1771041332.19822 42495 4c059ee91ea2059e29286ac1f5e7a21b ""
+  "lab1-report.aux" 1771455976.48777 10875 4d49f5f4156dd80fb1b0f609af39f957 "pdflatex"
+  "lab1-report.out" 1771455976.48855 3542 25af4908261b03d6720639a23d38bfdb "pdflatex"
+  "lab1-report.tex" 1771455975.95368 42621 2b72d9d5209ef97114040f9019e3d3a5 ""
   (generated)
   "lab1-report.aux"
   "lab1-report.log"
