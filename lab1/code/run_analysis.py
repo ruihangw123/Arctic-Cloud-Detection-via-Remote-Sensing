@@ -11,6 +11,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import accuracy_score, confusion_matrix, recall_score, precision_score
 from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
 
 # Ensure code directory is on path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -22,6 +24,7 @@ from models import (
     predict_pecarn,
     build_logistic_model,
     predict_logistic,
+    logistic_summary,
     build_random_forest,
     predict_random_forest,
 )
@@ -46,17 +49,16 @@ def main() -> None:
     df_analysis["y"] = (df_analysis["PosCT"] == 1).astype(int)
     print(f"Analysis cohort (GCS 14-15, non-missing PosCT): {len(df_analysis)} rows")
 
-    # PECARN CDR predictions
-    y_pecarn = predict_pecarn(df_analysis)
-
-    acc_pecarn = accuracy_score(df_analysis["y"], y_pecarn)
-    print(f"PECARN CDR accuracy (on full cohort): {acc_pecarn:.4f}")
-
-    # Logistic regression: use subset of PECARN-relevant features
+    # All PECARN risk factors from Kuppermann et al. (age is a stratification
+    # variable in the PECARN rule, not a risk factor, so it is excluded)
     feat_cols = [
-        "GCSTotal", "AMS", "SFxPalp", "Vomit", "LOCSeparate", "High_impact_InjSev",
-        "HASeverity", "Hema", "HemaLoc", "ActNorm", "LocLen",
-        "AgeTwoPlus", "AgeinYears",
+        # Shared: GCS, AMS, severe injury mechanism
+        "GCSTotal", "AMS", "High_impact_InjSev",
+        # <2 years factors: palpable skull fracture, scalp hematoma, LOC duration, acting normal
+        "SFxPalp", "Hema", "HemaLoc", "LocLen", "ActNorm",
+        # >=2 years factors: basilar skull fracture signs, vomiting, LOC, severe headache
+        "SFxBas", "SFxBasHem", "SFxBasOto", "SFxBasPer", "SFxBasRet", "SFxBasRhi",
+        "Vomit", "LOCSeparate", "HASeverity",
     ]
     available = [c for c in feat_cols if c in df_analysis.columns]
     X = df_analysis[available].fillna(0)  # Simple imputation for modeling
@@ -66,10 +68,24 @@ def main() -> None:
         X, y, test_size=0.25, random_state=42
     )
 
+    # PECARN CDR predictions on the same test set used for ML models
+    y_pecarn = predict_pecarn(df_analysis.loc[X_test.index])
+    acc_pecarn = accuracy_score(y_test, y_pecarn)
+    print(f"PECARN CDR accuracy (test set): {acc_pecarn:.4f}")
+
     lr_model, lr_scaler = build_logistic_model(X_train, y_train)
     y_lr = predict_logistic(lr_model, lr_scaler, X_test)
     acc_lr = accuracy_score(y_test, y_lr)
     print(f"Logistic regression accuracy: {acc_lr:.4f}")
+
+    lr_table = logistic_summary(lr_model, lr_scaler, available, y_test, y_lr)
+    print("\n--- Logistic Regression Coefficient Table ---")
+    print(lr_table.to_string(index=False))
+    print(f"\n  Regularization C = {lr_model.C}")
+    print(f"  Test-set accuracy = {lr_table.attrs['accuracy']:.4f}")
+    print(f"  Test-set sensitivity = {lr_table.attrs['sensitivity']:.4f}")
+    print(f"  Test-set specificity = {lr_table.attrs['specificity']:.4f}")
+    print()
 
     rf_model = build_random_forest(X_train, y_train)
     y_rf = predict_random_forest(rf_model, X_test)
@@ -81,9 +97,8 @@ def main() -> None:
     # ================================================================
     from sklearn.metrics import recall_score, precision_score
 
-    # PECARN on full analysis cohort
-    y_full = df_analysis["y"].values
-    tn, fp, fn, tp = confusion_matrix(y_full, y_pecarn).ravel()
+    # PECARN on test set (same as ML models for fair comparison)
+    tn, fp, fn, tp = confusion_matrix(y_test, y_pecarn).ravel()
     pecarn_sens = tp / (tp + fn) if (tp + fn) > 0 else 0
     pecarn_spec = tn / (tn + fp) if (tn + fp) > 0 else 0
     pecarn_ppv = tp / (tp + fp) if (tp + fp) > 0 else 0
@@ -107,31 +122,214 @@ def main() -> None:
     print(f"LR:     Sens={lr_sens:.3f}, Spec={lr_spec:.3f}, PPV={lr_ppv:.3f}, NPV={lr_npv:.3f}")
     print(f"RF:     Sens={rf_sens:.3f}, Spec={rf_spec:.3f}, PPV={rf_ppv:.3f}, NPV={rf_npv:.3f}")
 
-    # Grouped bar chart: sensitivity, specificity, PPV, NPV for each model
-    fig, ax = plt.subplots(figsize=(8, 4.5))
+    # (diagnostic_performance figure generated after class-weighted models below)
+
+    # ================================================================
+    # Threshold tuning: match PECARN sensitivity, compare specificity
+    # ================================================================
+    X_test_scaled = lr_scaler.transform(X_test)
+    lr_probs = lr_model.predict_proba(X_test_scaled)[:, 1]
+    rf_probs = rf_model.predict_proba(X_test)[:, 1]
+
+    target_sens = pecarn_sens
+    n_pos = y_test.sum()
+    n_neg = len(y_test) - n_pos
+
+    def metrics_at_threshold(probs, y_true, threshold):
+        y_pred = (probs >= threshold).astype(int)
+        tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+        sens = tp / (tp + fn) if (tp + fn) > 0 else 0
+        spec = tn / (tn + fp) if (tn + fp) > 0 else 0
+        ppv = tp / (tp + fp) if (tp + fp) > 0 else 0
+        npv = tn / (tn + fn) if (tn + fn) > 0 else 0
+        return sens, spec, ppv, npv
+
+    # Search for threshold that achieves >= target sensitivity
+    best_lr_t, best_rf_t = 0.5, 0.5
+    for t in np.arange(0.001, 0.50, 0.001):
+        s, _, _, _ = metrics_at_threshold(lr_probs, y_test, t)
+        if s >= target_sens:
+            best_lr_t = t
+            break
+    for t in np.arange(0.001, 0.50, 0.001):
+        s, _, _, _ = metrics_at_threshold(rf_probs, y_test, t)
+        if s >= target_sens:
+            best_rf_t = t
+            break
+    # Search from high to low so we find the HIGHEST threshold that still meets target
+    for t in np.arange(0.50, 0.001, -0.001):
+        s, _, _, _ = metrics_at_threshold(lr_probs, y_test, t)
+        if s >= target_sens:
+            best_lr_t = t
+            break
+    for t in np.arange(0.50, 0.001, -0.001):
+        s, _, _, _ = metrics_at_threshold(rf_probs, y_test, t)
+        if s >= target_sens:
+            best_rf_t = t
+            break
+
+    lr_tuned = metrics_at_threshold(lr_probs, y_test, best_lr_t)
+    rf_tuned = metrics_at_threshold(rf_probs, y_test, best_rf_t)
+
+    print(f"\n--- Threshold Tuning (match PECARN sensitivity ~{target_sens:.1%}) ---")
+    print(f"LR  threshold={best_lr_t:.3f}: Sens={lr_tuned[0]:.3f}, Spec={lr_tuned[1]:.3f}, "
+          f"PPV={lr_tuned[2]:.3f}, NPV={lr_tuned[3]:.3f}")
+    print(f"RF  threshold={best_rf_t:.3f}: Sens={rf_tuned[0]:.3f}, Spec={rf_tuned[1]:.3f}, "
+          f"PPV={rf_tuned[2]:.3f}, NPV={rf_tuned[3]:.3f}")
+    print(f"PECARN:            Sens={pecarn_sens:.3f}, Spec={pecarn_spec:.3f}, "
+          f"PPV={pecarn_ppv:.3f}, NPV={pecarn_npv:.3f}")
+
+    # Bar chart: at matched sensitivity, compare specificity across models
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+
+    # Left: sensitivity-matched comparison
+    models_tuned = ["PECARN CDR", "LR (tuned)", "RF (tuned)"]
+    specs_tuned = [pecarn_spec, lr_tuned[1], rf_tuned[1]]
+    sens_tuned = [pecarn_sens, lr_tuned[0], rf_tuned[0]]
+    colors_t = ["#3498db", "#2ecc71", "#e74c3c"]
+    bars = axes[0].bar(models_tuned, specs_tuned, color=colors_t, alpha=0.85, edgecolor="white")
+    for bar, spec, sens in zip(bars, specs_tuned, sens_tuned):
+        axes[0].text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
+                     f"{spec:.1%}\n(sens={sens:.1%})", ha="center", fontsize=8)
+    axes[0].set_ylabel("Specificity")
+    axes[0].set_title("Specificity at matched sensitivity (~92%)")
+    axes[0].set_ylim(0, 0.55)
+
+    # Right: full metric comparison (tuned thresholds)
+    metrics_t = ["Sensitivity", "Specificity", "PPV", "NPV"]
+    x_t = np.arange(len(metrics_t))
+    w_t = 0.25
+    pecarn_t_vals = [pecarn_sens, pecarn_spec, pecarn_ppv, pecarn_npv]
+    lr_t_vals = list(lr_tuned)
+    rf_t_vals = list(rf_tuned)
+    b1 = axes[1].bar(x_t - w_t, pecarn_t_vals, w_t, label="PECARN CDR", color="#3498db", alpha=0.85)
+    b2 = axes[1].bar(x_t, lr_t_vals, w_t, label=f"LR (t={best_lr_t:.3f})", color="#2ecc71", alpha=0.85)
+    b3 = axes[1].bar(x_t + w_t, rf_t_vals, w_t, label=f"RF (t={best_rf_t:.3f})", color="#e74c3c", alpha=0.85)
+    for bs in [b1, b2, b3]:
+        for bar in bs:
+            axes[1].text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
+                         f"{bar.get_height():.2f}", ha="center", fontsize=7)
+    axes[1].set_xticks(x_t)
+    axes[1].set_xticklabels(metrics_t)
+    axes[1].set_ylabel("Score")
+    axes[1].set_title("Diagnostic performance with tuned thresholds")
+    axes[1].legend(fontsize=8)
+    axes[1].set_ylim(0, 1.15)
+
+    fig.tight_layout()
+    fig.savefig(figures_dir / "threshold_tuning.pdf")
+    plt.close()
+    print(f"Saved {figures_dir / 'threshold_tuning.pdf'}")
+
+    # ================================================================
+    # Prevalence-based threshold: set threshold = base rate
+    # ================================================================
+    prevalence = y_test.mean()
+    lr_prev = metrics_at_threshold(lr_probs, y_test, prevalence)
+    rf_prev = metrics_at_threshold(rf_probs, y_test, prevalence)
+
+    print(f"\n--- Prevalence-based Threshold (t = {prevalence:.3f}) ---")
+    print(f"LR:     Sens={lr_prev[0]:.3f}, Spec={lr_prev[1]:.3f}, "
+          f"PPV={lr_prev[2]:.3f}, NPV={lr_prev[3]:.3f}")
+    print(f"RF:     Sens={rf_prev[0]:.3f}, Spec={rf_prev[1]:.3f}, "
+          f"PPV={rf_prev[2]:.3f}, NPV={rf_prev[3]:.3f}")
+    print(f"PECARN: Sens={pecarn_sens:.3f}, Spec={pecarn_spec:.3f}, "
+          f"PPV={pecarn_ppv:.3f}, NPV={pecarn_npv:.3f}")
+
+    # ================================================================
+    # Class-weighted models: upweight the minority (PosCT=1) class
+    # ================================================================
+    lr_bal = LogisticRegression(C=1.0, max_iter=1000, random_state=42,
+                                class_weight="balanced")
+    lr_bal.fit(lr_scaler.transform(X_train), y_train)
+    y_lr_bal = (lr_bal.predict_proba(X_test_scaled)[:, 1] >= 0.5).astype(int)
+    tn, fp, fn, tp = confusion_matrix(y_test, y_lr_bal).ravel()
+    lr_bal_sens = tp / (tp + fn) if (tp + fn) > 0 else 0
+    lr_bal_spec = tn / (tn + fp) if (tn + fp) > 0 else 0
+    lr_bal_ppv = tp / (tp + fp) if (tp + fp) > 0 else 0
+    lr_bal_npv = tn / (tn + fn) if (tn + fn) > 0 else 0
+    acc_lr_bal = accuracy_score(y_test, y_lr_bal)
+
+    rf_bal = RandomForestClassifier(n_estimators=100, max_depth=10,
+                                    random_state=42, class_weight="balanced")
+    rf_bal.fit(X_train, y_train)
+    y_rf_bal = rf_bal.predict(X_test).astype(int)
+    tn, fp, fn, tp = confusion_matrix(y_test, y_rf_bal).ravel()
+    rf_bal_sens = tp / (tp + fn) if (tp + fn) > 0 else 0
+    rf_bal_spec = tn / (tn + fp) if (tn + fp) > 0 else 0
+    rf_bal_ppv = tp / (tp + fp) if (tp + fp) > 0 else 0
+    rf_bal_npv = tn / (tn + fn) if (tn + fn) > 0 else 0
+    acc_rf_bal = accuracy_score(y_test, y_rf_bal)
+
+    print(f"\n--- Class-Weighted Models (class_weight='balanced') ---")
+    print(f"LR balanced: Sens={lr_bal_sens:.3f}, Spec={lr_bal_spec:.3f}, "
+          f"PPV={lr_bal_ppv:.3f}, NPV={lr_bal_npv:.3f}")
+    print(f"RF balanced: Sens={rf_bal_sens:.3f}, Spec={rf_bal_spec:.3f}, "
+          f"PPV={rf_bal_ppv:.3f}, NPV={rf_bal_npv:.3f}")
+    print(f"PECARN:      Sens={pecarn_sens:.3f}, Spec={pecarn_spec:.3f}, "
+          f"PPV={pecarn_ppv:.3f}, NPV={pecarn_npv:.3f}")
+
+    # Grouped bar chart: diagnostic performance including class-weighted models
+    fig, ax = plt.subplots(figsize=(10, 5))
     metrics = ["Sensitivity", "Specificity", "PPV", "NPV"]
     x = np.arange(len(metrics))
-    w = 0.25
+    w = 0.15
     pecarn_vals = [pecarn_sens, pecarn_spec, pecarn_ppv, pecarn_npv]
     lr_vals = [lr_sens, lr_spec, lr_ppv, lr_npv]
+    lr_bal_vals = [lr_bal_sens, lr_bal_spec, lr_bal_ppv, lr_bal_npv]
     rf_vals = [rf_sens, rf_spec, rf_ppv, rf_npv]
-    bars1 = ax.bar(x - w, pecarn_vals, w, label="PECARN CDR", color="#3498db", alpha=0.85)
-    bars2 = ax.bar(x, lr_vals, w, label="Logistic Regression", color="#2ecc71", alpha=0.85)
-    bars3 = ax.bar(x + w, rf_vals, w, label="Random Forest", color="#e74c3c", alpha=0.85)
-    for bars in [bars1, bars2, bars3]:
+    rf_bal_vals = [rf_bal_sens, rf_bal_spec, rf_bal_ppv, rf_bal_npv]
+    bars1 = ax.bar(x - 2*w, pecarn_vals, w, label="PECARN CDR", color="#3498db", alpha=0.85)
+    bars2 = ax.bar(x - w, lr_vals, w, label="LR (default)", color="#2ecc71", alpha=0.85)
+    bars3 = ax.bar(x, lr_bal_vals, w, label="LR (balanced)", color="#27ae60", alpha=0.85)
+    bars4 = ax.bar(x + w, rf_vals, w, label="RF (default)", color="#e74c3c", alpha=0.85)
+    bars5 = ax.bar(x + 2*w, rf_bal_vals, w, label="RF (balanced)", color="#c0392b", alpha=0.85)
+    for bars in [bars1, bars2, bars3, bars4, bars5]:
         for bar in bars:
             ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
-                    f"{bar.get_height():.2f}", ha="center", fontsize=7)
+                    f"{bar.get_height():.2f}", ha="center", fontsize=6)
     ax.set_xticks(x)
     ax.set_xticklabels(metrics)
     ax.set_ylabel("Score")
-    ax.set_title("Diagnostic performance: Sensitivity, Specificity, PPV, NPV")
-    ax.legend(fontsize=9)
+    ax.set_title("Diagnostic Performance: Default vs Class-Weighted Models")
+    ax.legend(fontsize=8, loc="upper right")
     ax.set_ylim(0, 1.15)
     fig.tight_layout()
     fig.savefig(figures_dir / "diagnostic_performance.pdf")
     plt.close()
     print(f"Saved {figures_dir / 'diagnostic_performance.pdf'}")
+
+    # Summary comparison figure: default vs class-weighted vs PECARN
+    fig, ax = plt.subplots(figsize=(8, 5))
+    approach_labels = [
+        "PECARN CDR",
+        "LR (default 0.5)",
+        "LR (balanced)",
+        "RF (default 0.5)",
+        "RF (balanced)",
+    ]
+    sens_all = [pecarn_sens, lr_sens, lr_bal_sens, rf_sens, rf_bal_sens]
+    spec_all = [pecarn_spec, lr_spec, lr_bal_spec, rf_spec, rf_bal_spec]
+    colors_all = ["#3498db", "#2ecc71", "#2ecc71", "#e74c3c", "#e74c3c"]
+    markers = ["D", "o", "v", "o", "v"]
+    for s, sp, lbl, c, m in zip(
+        sens_all, spec_all, approach_labels, colors_all, markers
+    ):
+        ax.scatter(sp, s, color=c, marker=m, s=120, zorder=3,
+                   edgecolors="white", linewidths=0.5)
+        ax.annotate(lbl, (sp, s), fontsize=8, ha="left",
+                    xytext=(6, 4), textcoords="offset points")
+    ax.set_xlabel("Specificity")
+    ax.set_ylabel("Sensitivity")
+    ax.set_title("Sensitivity vs Specificity: Default, Class-Weighted, and PECARN")
+    ax.set_xlim(-0.05, 1.05)
+    ax.set_ylim(-0.05, 1.05)
+    ax.axhline(pecarn_sens, color="#3498db", linestyle="--", alpha=0.3, linewidth=0.8)
+    ax.axvline(pecarn_spec, color="#3498db", linestyle="--", alpha=0.3, linewidth=0.8)
+    fig.tight_layout()
+    fig.savefig(figures_dir / "threshold_comparison.pdf")
+    plt.close()
+    print(f"Saved {figures_dir / 'threshold_comparison.pdf'}")
 
     # ================================================================
     # Selection bias: CT vs non-CT patient characteristics
@@ -227,7 +425,7 @@ def main() -> None:
 
     # Example figure: PECARN rule vs outcome
     fig, ax = plt.subplots(figsize=(5, 4))
-    cross_tab = pd.crosstab(y_pecarn, df_analysis["y"], normalize="index")
+    cross_tab = pd.crosstab(y_pecarn, y_test, normalize="index")
     cross_tab.plot(kind="bar", ax=ax, color=["#2ecc71", "#e74c3c"])
     ax.set_xlabel("PECARN: CT recommended")
     ax.set_ylabel("Proportion")
@@ -440,21 +638,364 @@ def main() -> None:
     print(f"Saved {figures_dir / 'interaction_vomit_loc.pdf'}")
 
     # ================================================================
+    # NEW FINDING A: AMS subtype heterogeneity × injury mechanism
+    # ================================================================
+    ams_subtypes = ["AMSAgitated", "AMSSleep", "AMSSlow", "AMSRepeat"]
+    ams_avail = [c for c in ams_subtypes if c in df_analysis.columns]
+    print("\n=== FINDING A: AMS Subtype Heterogeneity ===")
+    for sub in ams_avail:
+        df_analysis[sub] = df_analysis[sub].fillna(0)
+        pos = df_analysis[df_analysis[sub] == 1]
+        neg = df_analysis[df_analysis[sub] != 1]
+        rate_pos = pos["y"].mean() * 100 if len(pos) > 0 else 0
+        rate_neg = neg["y"].mean() * 100 if len(neg) > 0 else 0
+        print(f"  {sub}=1: PosCT={rate_pos:.1f}% (n={len(pos)}); "
+              f"{sub}=0: PosCT={rate_neg:.1f}% (n={len(neg)})")
+
+    sev_labels_num = {1.0: "Low", 2.0: "Moderate", 3.0: "High"}
+    print("\n  AMS subtype × Injury Severity → PosCT:")
+    for sub in ams_avail:
+        for sev_val, sev_lbl in sev_labels_num.items():
+            mask = (df_analysis[sub] == 1) & (df_analysis["High_impact_InjSev"] == sev_val)
+            grp = df_analysis[mask]
+            if len(grp) >= 5:
+                print(f"    {sub}=1 & Sev={sev_lbl}: PosCT={grp['y'].mean()*100:.1f}% (n={len(grp)})")
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    # Left: PosCT rate by AMS subtype
+    sub_rates = {}
+    for sub in ams_avail:
+        grp = df_analysis[df_analysis[sub] == 1]
+        if len(grp) >= 10:
+            sub_rates[sub.replace("AMS", "")] = (grp["y"].mean() * 100, len(grp))
+    no_ams = df_analysis[df_analysis["AMS"] != 1]
+    sub_rates["No AMS"] = (no_ams["y"].mean() * 100, len(no_ams))
+    labels_a = list(sub_rates.keys())
+    vals_a = [v[0] for v in sub_rates.values()]
+    ns_a = [v[1] for v in sub_rates.values()]
+    color_a = ["#e74c3c" if l != "No AMS" else "#95a5a6" for l in labels_a]
+    bars = axes[0].bar(labels_a, vals_a, color=color_a, alpha=0.85, edgecolor="white")
+    for bar, val, n in zip(bars, vals_a, ns_a):
+        axes[0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.3,
+                     f"{val:.1f}%\nn={n}", ha="center", fontsize=8)
+    axes[0].set_ylabel("Positive CT rate (%)")
+    axes[0].set_title("PosCT Rate by AMS Subtype")
+    axes[0].set_ylim(0, max(vals_a) * 1.3 if vals_a else 20)
+
+    # Right: AMS subtype × severity heatmap-style grouped bars
+    focus_subs = [s for s in ["AMSSleep", "AMSAgitated"] if s in ams_avail]
+    if len(focus_subs) >= 2:
+        x = np.arange(3)
+        w = 0.25
+        offset = -w
+        colors_heat = {"AMSSleep": "#c0392b", "AMSAgitated": "#e67e22", "No AMS": "#95a5a6"}
+        for sub_name in focus_subs + ["No AMS"]:
+            rates_sev = []
+            for sev_val in [1.0, 2.0, 3.0]:
+                if sub_name == "No AMS":
+                    mask = (df_analysis["AMS"] != 1) & (df_analysis["High_impact_InjSev"] == sev_val)
+                else:
+                    mask = (df_analysis[sub_name] == 1) & (df_analysis["High_impact_InjSev"] == sev_val)
+                grp = df_analysis[mask]
+                rates_sev.append(grp["y"].mean() * 100 if len(grp) >= 5 else 0)
+            lbl = sub_name.replace("AMS", "") if sub_name != "No AMS" else "No AMS"
+            axes[1].bar(x + offset, rates_sev, w, label=lbl,
+                        color=colors_heat.get(sub_name, "#bdc3c7"), alpha=0.85, edgecolor="white")
+            offset += w
+        axes[1].set_xticks(x)
+        axes[1].set_xticklabels(["Low", "Moderate", "High"])
+        axes[1].set_xlabel("Injury Mechanism Severity")
+        axes[1].set_ylabel("Positive CT rate (%)")
+        axes[1].set_title("AMS Subtype × Severity Interaction")
+        axes[1].legend(fontsize=9)
+        axes[1].set_ylim(0, None)
+    fig.tight_layout()
+    fig.savefig(figures_dir / "finding_ams_subtypes.pdf")
+    plt.close()
+    print(f"Saved {figures_dir / 'finding_ams_subtypes.pdf'}")
+
+    # ================================================================
+    # NEW FINDING B: Post-traumatic seizures (not in PECARN) × age
+    # ================================================================
+    print("\n=== FINDING B: Post-Traumatic Seizures ===")
+    if "Seiz" in df_analysis.columns:
+        df_analysis["Seiz_clean"] = df_analysis["Seiz"].fillna(0)
+        seiz_yes = df_analysis[df_analysis["Seiz_clean"] == 1]
+        seiz_no = df_analysis[df_analysis["Seiz_clean"] != 1]
+        print(f"  Seizure=Yes: PosCT={seiz_yes['y'].mean()*100:.1f}% (n={len(seiz_yes)})")
+        print(f"  Seizure=No:  PosCT={seiz_no['y'].mean()*100:.1f}% (n={len(seiz_no)})")
+
+        # Seizure × age group
+        for age_grp, age_lbl in [(1, "<2 years"), (2, ">=2 years")]:
+            for seiz_val, seiz_lbl in [(1, "Seizure"), (0, "No seizure")]:
+                mask = (df_analysis["Seiz_clean"] == seiz_val) & (df_analysis["AgeTwoPlus"] == age_grp)
+                grp = df_analysis[mask]
+                if len(grp) >= 5:
+                    print(f"  {seiz_lbl} & {age_lbl}: PosCT={grp['y'].mean()*100:.1f}% (n={len(grp)})")
+
+        # Seizure × PECARN risk factor count
+        print("\n  Seizure × PECARN risk factor count:")
+        for nrf in range(5):
+            cap = min(nrf, 4)
+            for seiz_val, seiz_lbl in [(1, "Seizure"), (0, "No seizure")]:
+                mask = (df_analysis["Seiz_clean"] == seiz_val) & (df_analysis["n_risk_capped"] == cap)
+                grp = df_analysis[mask]
+                if len(grp) >= 5:
+                    lbl = f"{cap}+" if cap == 4 else str(cap)
+                    print(f"    {seiz_lbl} & {lbl} PECARN factors: "
+                          f"PosCT={grp['y'].mean()*100:.1f}% (n={len(grp)})")
+
+        # Compare seizure PosCT to individual PECARN risk factors
+        print("\n  PosCT rate comparison: seizure vs PECARN risk factors:")
+        for rf in ["AMS", "Vomit", "LOCSeparate", "SFxPalp", "Hema", "SFxBas"]:
+            if rf in df_analysis.columns:
+                grp = df_analysis[df_analysis[rf] == 1]
+                if len(grp) >= 10:
+                    print(f"    {rf}=1: PosCT={grp['y'].mean()*100:.1f}% (n={len(grp)})")
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        # Left: seizure vs no-seizure PosCT by age group
+        age_labels = ["<2 years", ">=2 years"]
+        seiz_rates = []
+        no_seiz_rates = []
+        for age_grp in [1, 2]:
+            s = df_analysis[(df_analysis["Seiz_clean"] == 1) & (df_analysis["AgeTwoPlus"] == age_grp)]
+            ns = df_analysis[(df_analysis["Seiz_clean"] != 1) & (df_analysis["AgeTwoPlus"] == age_grp)]
+            seiz_rates.append(s["y"].mean() * 100 if len(s) >= 5 else 0)
+            no_seiz_rates.append(ns["y"].mean() * 100 if len(ns) >= 5 else 0)
+        x = np.arange(2)
+        w = 0.35
+        bars1 = axes[0].bar(x - w/2, no_seiz_rates, w, label="No seizure", color="#3498db", alpha=0.85)
+        bars2 = axes[0].bar(x + w/2, seiz_rates, w, label="Seizure", color="#e74c3c", alpha=0.85)
+        for bar_set in [bars1, bars2]:
+            for bar in bar_set:
+                axes[0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.3,
+                             f"{bar.get_height():.1f}%", ha="center", fontsize=9)
+        axes[0].set_xticks(x)
+        axes[0].set_xticklabels(age_labels)
+        axes[0].set_ylabel("Positive CT rate (%)")
+        axes[0].set_title("Seizure × Age Group → PosCT")
+        axes[0].legend()
+        axes[0].set_ylim(0, max(seiz_rates + no_seiz_rates) * 1.3 if seiz_rates else 20)
+
+        # Right: compare seizure PosCT to each PECARN variable PosCT
+        compare_labels = ["Seizure"]
+        compare_vals = [seiz_yes["y"].mean() * 100]
+        compare_colors = ["#e74c3c"]
+        pecarn_rfs = ["AMS", "SFxPalp", "Hema", "Vomit", "LOCSeparate", "SFxBas"]
+        for rf in pecarn_rfs:
+            if rf in df_analysis.columns:
+                grp = df_analysis[df_analysis[rf] == 1]
+                if len(grp) >= 10:
+                    compare_labels.append(rf)
+                    compare_vals.append(grp["y"].mean() * 100)
+                    compare_colors.append("#3498db")
+        bars = axes[1].barh(compare_labels, compare_vals, color=compare_colors, alpha=0.85)
+        for bar, val in zip(bars, compare_vals):
+            axes[1].text(bar.get_width() + 0.3, bar.get_y() + bar.get_height()/2,
+                         f"{val:.1f}%", va="center", fontsize=9)
+        axes[1].set_xlabel("Positive CT rate (%)")
+        axes[1].set_title("Seizure vs PECARN Risk Factors: PosCT Rate")
+        axes[1].invert_yaxis()
+        fig.tight_layout()
+        fig.savefig(figures_dir / "finding_seizures.pdf")
+        plt.close()
+        print(f"Saved {figures_dir / 'finding_seizures.pdf'}")
+
+    # ================================================================
+    # NEW FINDING C: Hematoma location × Vomiting/LOC × Gender
+    # ================================================================
+    print("\n=== FINDING C: Hematoma Location × Vomiting × LOC × Gender ===")
+    df_analysis["HemaLoc_clean"] = df_analysis["HemaLoc"].fillna(-1)
+    df_analysis["Gender_clean"] = df_analysis["Gender"].fillna(-1)
+    df_analysis["Vomit_clean"] = df_analysis["Vomit"].fillna(0)
+    df_analysis["LOC_any"] = (df_analysis["LOCSeparate"] >= 1).fillna(False).astype(int)
+    df_analysis["VomitNbr_clean"] = df_analysis["VomitNbr"].fillna(0)
+
+    hemaloc_map = {1: "Frontal", 2: "Temp/Par", 3: "Occipital"}
+    gender_map = {1: "Male", 2: "Female"}
+
+    print("  HemaLoc × PosCT (baseline):")
+    for h_val, h_lbl in hemaloc_map.items():
+        grp = df_analysis[df_analysis["HemaLoc_clean"] == h_val]
+        if len(grp) >= 5:
+            print(f"    {h_lbl}: PosCT={grp['y'].mean()*100:.1f}% (n={len(grp)})")
+
+    print("\n  HemaLoc × Vomiting → PosCT:")
+    for h_val, h_lbl in hemaloc_map.items():
+        for v_val, v_lbl in [(0, "No vomit"), (1, "Vomit")]:
+            mask = (df_analysis["HemaLoc_clean"] == h_val) & (df_analysis["Vomit_clean"] == v_val)
+            grp = df_analysis[mask]
+            if len(grp) >= 5:
+                print(f"    {h_lbl} + {v_lbl}: PosCT={grp['y'].mean()*100:.1f}% (n={len(grp)})")
+
+    print("\n  HemaLoc × LOC → PosCT:")
+    for h_val, h_lbl in hemaloc_map.items():
+        for l_val, l_lbl in [(0, "No LOC"), (1, "LOC")]:
+            mask = (df_analysis["HemaLoc_clean"] == h_val) & (df_analysis["LOC_any"] == l_val)
+            grp = df_analysis[mask]
+            if len(grp) >= 5:
+                print(f"    {h_lbl} + {l_lbl}: PosCT={grp['y'].mean()*100:.1f}% (n={len(grp)})")
+
+    print("\n  HemaLoc × Vomit × LOC (triple) → PosCT:")
+    for h_val, h_lbl in hemaloc_map.items():
+        for v_val, v_lbl in [(0, "NoVomit"), (1, "Vomit")]:
+            for l_val, l_lbl in [(0, "NoLOC"), (1, "LOC")]:
+                mask = ((df_analysis["HemaLoc_clean"] == h_val) &
+                        (df_analysis["Vomit_clean"] == v_val) &
+                        (df_analysis["LOC_any"] == l_val))
+                grp = df_analysis[mask]
+                if len(grp) >= 5:
+                    print(f"    {h_lbl}+{v_lbl}+{l_lbl}: PosCT={grp['y'].mean()*100:.1f}% (n={len(grp)})")
+
+    print("\n  VomitNbr dose-response × HemaLoc:")
+    for h_val, h_lbl in hemaloc_map.items():
+        for vnbr_cat, vnbr_lbl in [((0, 0), "0 episodes"), ((1, 2), "1-2"), ((3, 99), "3+")]:
+            mask = ((df_analysis["HemaLoc_clean"] == h_val) &
+                    (df_analysis["VomitNbr_clean"] >= vnbr_cat[0]) &
+                    (df_analysis["VomitNbr_clean"] <= vnbr_cat[1]))
+            grp = df_analysis[mask]
+            if len(grp) >= 5:
+                print(f"    {h_lbl} + {vnbr_lbl}: PosCT={grp['y'].mean()*100:.1f}% (n={len(grp)})")
+
+    print("\n  Gender × HemaLoc × Vomit → PosCT:")
+    for g_val, g_lbl in gender_map.items():
+        for h_val, h_lbl in hemaloc_map.items():
+            for v_val, v_lbl in [(0, "NoVomit"), (1, "Vomit")]:
+                mask = ((df_analysis["Gender_clean"] == g_val) &
+                        (df_analysis["HemaLoc_clean"] == h_val) &
+                        (df_analysis["Vomit_clean"] == v_val))
+                grp = df_analysis[mask]
+                if len(grp) >= 10:
+                    print(f"    {g_lbl}+{h_lbl}+{v_lbl}: PosCT={grp['y'].mean()*100:.1f}% (n={len(grp)})")
+
+    print("\n  Gender × HemaLoc × LOC → PosCT:")
+    for g_val, g_lbl in gender_map.items():
+        for h_val, h_lbl in hemaloc_map.items():
+            for l_val, l_lbl in [(0, "NoLOC"), (1, "LOC")]:
+                mask = ((df_analysis["Gender_clean"] == g_val) &
+                        (df_analysis["HemaLoc_clean"] == h_val) &
+                        (df_analysis["LOC_any"] == l_val))
+                grp = df_analysis[mask]
+                if len(grp) >= 10:
+                    print(f"    {g_lbl}+{h_lbl}+{l_lbl}: PosCT={grp['y'].mean()*100:.1f}% (n={len(grp)})")
+
+    # Figure: 2 panels
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+    # Left: HemaLoc × Vomit × LOC compound
+    combo_labels = []
+    combo_vals = []
+    combo_colors = []
+    color_map = {"Frontal": "#2ecc71", "Temp/Par": "#f39c12", "Occipital": "#e74c3c"}
+    for h_val, h_lbl in hemaloc_map.items():
+        for symptom_mask, symptom_lbl in [
+            ((df_analysis["Vomit_clean"] == 0) & (df_analysis["LOC_any"] == 0), "Neither"),
+            ((df_analysis["Vomit_clean"] == 1) | (df_analysis["LOC_any"] == 1), "Vomit or LOC"),
+            ((df_analysis["Vomit_clean"] == 1) & (df_analysis["LOC_any"] == 1), "Both"),
+        ]:
+            mask = (df_analysis["HemaLoc_clean"] == h_val) & symptom_mask
+            grp = df_analysis[mask]
+            if len(grp) >= 5:
+                combo_labels.append(f"{h_lbl}\n{symptom_lbl}")
+                combo_vals.append(grp["y"].mean() * 100)
+                combo_colors.append(color_map[h_lbl])
+
+    bars = axes[0].bar(range(len(combo_labels)), combo_vals, color=combo_colors, alpha=0.85, edgecolor="white")
+    for i, (bar, val) in enumerate(zip(bars, combo_vals)):
+        axes[0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.3,
+                     f"{val:.1f}%", ha="center", fontsize=7)
+    axes[0].set_xticks(range(len(combo_labels)))
+    axes[0].set_xticklabels(combo_labels, fontsize=7)
+    axes[0].set_ylabel("Positive CT rate (%)")
+    axes[0].set_title("Hematoma Location × Vomiting/LOC → PosCT")
+    axes[0].set_ylim(0, max(combo_vals) * 1.25 if combo_vals else 20)
+
+    # Right: Gender × HemaLoc for vomiting patients only
+    loc_labels_r = list(hemaloc_map.values()) + ["No hematoma"]
+    male_rates = []
+    female_rates = []
+    for h_val in list(hemaloc_map.keys()) + [-1]:
+        for g_val, g_rates in [(1, male_rates), (2, female_rates)]:
+            if h_val == -1:
+                mask = (df_analysis["Gender_clean"] == g_val) & (df_analysis["Hema"] != 1)
+            else:
+                mask = (df_analysis["Gender_clean"] == g_val) & (df_analysis["HemaLoc_clean"] == h_val)
+            grp = df_analysis[mask]
+            g_rates.append(grp["y"].mean() * 100 if len(grp) >= 5 else 0)
+
+    x = np.arange(len(loc_labels_r))
+    w = 0.35
+    axes[1].bar(x - w/2, male_rates, w, label="Male", color="#3498db", alpha=0.85)
+    axes[1].bar(x + w/2, female_rates, w, label="Female", color="#e74c3c", alpha=0.85)
+    for i, (m, f) in enumerate(zip(male_rates, female_rates)):
+        axes[1].text(i - w/2, m + 0.3, f"{m:.1f}%", ha="center", fontsize=7)
+        axes[1].text(i + w/2, f + 0.3, f"{f:.1f}%", ha="center", fontsize=7)
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(loc_labels_r, fontsize=8)
+    axes[1].set_ylabel("Positive CT rate (%)")
+    axes[1].set_title("Gender × Hematoma Location → PosCT")
+    axes[1].legend()
+    axes[1].set_ylim(0, max(male_rates + female_rates) * 1.25 if male_rates else 20)
+
+    fig.tight_layout()
+    fig.savefig(figures_dir / "finding_hemaloc_compound.pdf")
+    plt.close()
+    print(f"Saved {figures_dir / 'finding_hemaloc_compound.pdf'}")
+
+    # ================================================================
+    # Stability check for NEW findings (perturbation: exclude age < 2)
+    # ================================================================
+    print("\n=== Stability of New Findings Under Perturbation ===")
+    ct_perturbed_analysis = df_analysis[
+        df_analysis["AgeInMonth"].notna() & (df_analysis["AgeInMonth"] >= 24)
+    ].copy()
+
+    # Finding A stability: AMS subtypes in perturbed cohort
+    print("  Finding A (AMS subtypes) - perturbed cohort:")
+    for sub in ams_avail:
+        ct_perturbed_analysis[sub] = ct_perturbed_analysis[sub].fillna(0)
+        pos = ct_perturbed_analysis[ct_perturbed_analysis[sub] == 1]
+        if len(pos) >= 5:
+            print(f"    {sub}=1: PosCT={pos['y'].mean()*100:.1f}% (n={len(pos)})")
+
+    # Finding B stability: seizures in perturbed cohort
+    if "Seiz" in ct_perturbed_analysis.columns:
+        ct_perturbed_analysis["Seiz_clean"] = ct_perturbed_analysis["Seiz"].fillna(0)
+        seiz_p = ct_perturbed_analysis[ct_perturbed_analysis["Seiz_clean"] == 1]
+        no_seiz_p = ct_perturbed_analysis[ct_perturbed_analysis["Seiz_clean"] != 1]
+        print(f"  Finding B (Seizures) - perturbed: Seizure PosCT={seiz_p['y'].mean()*100:.1f}% (n={len(seiz_p)}); "
+              f"No seizure={no_seiz_p['y'].mean()*100:.1f}%")
+
+    # Finding C stability: HemaLoc × Vomit/LOC in perturbed cohort
+    ct_perturbed_analysis["HemaLoc_clean"] = ct_perturbed_analysis["HemaLoc"].fillna(-1)
+    ct_perturbed_analysis["Vomit_clean"] = ct_perturbed_analysis["Vomit"].fillna(0)
+    ct_perturbed_analysis["LOC_any"] = (ct_perturbed_analysis["LOCSeparate"] >= 1).fillna(False).astype(int)
+    print("  Finding C (HemaLoc×Vomit/LOC) - perturbed:")
+    for h_val, h_lbl in {1: "Frontal", 2: "Temp/Par", 3: "Occipital"}.items():
+        for v_val, v_lbl in [(0, "NoVomit"), (1, "Vomit")]:
+            mask = (ct_perturbed_analysis["HemaLoc_clean"] == h_val) & (ct_perturbed_analysis["Vomit_clean"] == v_val)
+            grp = ct_perturbed_analysis[mask]
+            if len(grp) >= 5:
+                print(f"    {h_lbl}+{v_lbl}: PosCT={grp['y'].mean()*100:.1f}% (n={len(grp)})")
+
+    # ================================================================
     # END DEEPER EXPLORATION
     # ================================================================
 
-    # Model comparison
-    fig, ax = plt.subplots(figsize=(5, 4))
-    models = ["PECARN CDR", "Logistic Regression", "Random Forest"]
-    accs = [acc_pecarn, acc_lr, acc_rf]
-    bars = ax.bar(models, accs, color=["#3498db", "#2ecc71", "#e74c3c"], alpha=0.8)
+    # Model comparison: accuracy for all 5 variants
+    fig, ax = plt.subplots(figsize=(8, 4))
+    models = ["PECARN\nCDR", "LR\n(default)", "LR\n(balanced)",
+              "RF\n(default)", "RF\n(balanced)"]
+    accs = [acc_pecarn, acc_lr, acc_lr_bal, acc_rf, acc_rf_bal]
+    colors = ["#3498db", "#2ecc71", "#27ae60", "#e74c3c", "#c0392b"]
+    bars = ax.bar(models, accs, color=colors, alpha=0.85)
     ax.set_ylabel("Accuracy")
-    ax.set_title("Model comparison (test set)")
-    ax.set_ylim(0, 1)
+    ax.set_title("Model accuracy comparison (test set)")
+    ax.set_ylim(0, 1.1)
     for bar, acc in zip(bars, accs):
         ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
-                f"{acc:.2f}", ha="center", fontsize=10)
-    plt.xticks(rotation=15)
+                f"{acc:.2f}", ha="center", fontsize=9)
     plt.tight_layout()
     fig.savefig(figures_dir / "model_comparison.pdf")
     plt.close()

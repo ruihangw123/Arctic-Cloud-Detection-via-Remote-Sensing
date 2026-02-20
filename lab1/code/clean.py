@@ -89,7 +89,7 @@ def flag_inconsistencies(df: pd.DataFrame) -> pd.DataFrame:
     # Age: AgeTwoPlus (1=<2y, 2=>=2y) vs AgeInMonth
     if "AgeInMonth" in df.columns and "AgeTwoPlus" in df.columns:
         valid_age = df["AgeInMonth"].notna() & (df["AgeInMonth"] >= 0) & (df["AgeInMonth"] <= 300)
-        under2_from_month = (df.loc[valid_age, "AgeInMonth"] / 12 < 2).astype(int) + 1
+        under2_from_month = (df.loc[valid_age, "AgeInMonth"] / 12 >= 2).astype(int) + 1
         expected = under2_from_month
         actual = df.loc[valid_age, "AgeTwoPlus"]
         df.loc[valid_age & (actual != expected), "Age_mismatch"] = True

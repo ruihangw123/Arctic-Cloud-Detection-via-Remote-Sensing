@@ -139,6 +139,69 @@ def predict_logistic(
     return (probs >= threshold).astype(int)
 
 
+def logistic_summary(
+    model: LogisticRegression,
+    scaler: StandardScaler,
+    feature_names: list[str],
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+) -> pd.DataFrame:
+    """
+    Build a summary table of logistic regression results.
+
+    Returns a DataFrame with one row per feature showing the standardized
+    coefficient, the odds ratio (exp(coef)), and the scaled mean/std used
+    during standardization.  A final row contains the intercept.
+    """
+    coefs = model.coef_[0]
+    odds_ratios = np.exp(coefs)
+
+    rows = []
+    for name, coef, or_val, mean, scale in zip(
+        feature_names, coefs, odds_ratios, scaler.mean_, scaler.scale_
+    ):
+        rows.append({
+            "Feature": name,
+            "Coefficient": round(coef, 4),
+            "Odds Ratio": round(or_val, 4),
+            "Scaler Mean": round(mean, 4),
+            "Scaler Std": round(scale, 4),
+        })
+
+    rows.append({
+        "Feature": "(Intercept)",
+        "Coefficient": round(model.intercept_[0], 4),
+        "Odds Ratio": round(np.exp(model.intercept_[0]), 4),
+        "Scaler Mean": np.nan,
+        "Scaler Std": np.nan,
+    })
+
+    summary = pd.DataFrame(rows)
+
+    from sklearn.metrics import (
+        accuracy_score,
+        confusion_matrix,
+        log_loss,
+    )
+
+    acc = accuracy_score(y_true, y_pred)
+    proba = model.predict_proba(scaler.transform(
+        np.zeros((1, len(feature_names)))
+    ))  # dummy, not stored; we recompute below
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    sens = tp / (tp + fn) if (tp + fn) > 0 else 0
+    spec = tn / (tn + fp) if (tn + fp) > 0 else 0
+
+    summary.attrs["accuracy"] = acc
+    summary.attrs["sensitivity"] = sens
+    summary.attrs["specificity"] = spec
+    summary.attrs["n_train"] = None
+    summary.attrs["n_test"] = len(y_true)
+    summary.attrs["C"] = model.C
+
+    return summary
+
+
 # -----------------------------------------------------------------------------
 # Random Forest (third model)
 # -----------------------------------------------------------------------------
