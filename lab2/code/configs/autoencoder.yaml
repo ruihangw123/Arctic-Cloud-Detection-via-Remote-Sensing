@@ -1,0 +1,38 @@
+data:
+  patch_size: 9
+
+dataloader_train:
+  batch_size: 4096
+  num_workers: 4
+  shuffle: true
+
+dataloader_val:
+  batch_size: 4096
+  num_workers: 4
+  shuffle: false
+
+model_type: conv
+
+autoencoder:
+  n_input_channels: 8
+  embedding_size: 32
+  noise_std: 0
+  channel_mask_prob: 0
+
+optimizer:
+  lr: 0.001
+
+trainer:
+  max_epochs: 100
+  log_every_n_steps: 20
+
+checkpoint:
+  save_top_k: 3
+  monitor: val_loss
+  mode: min
+  filename: model-{epoch:03d}-{val_loss:.4f}
+  dirpath: checkpoints
+
+wandb:
+  project: stat214-lab2
+  name: conv-ae-ps9-emb32-best

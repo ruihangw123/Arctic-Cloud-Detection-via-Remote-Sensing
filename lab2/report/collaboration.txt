@@ -1,0 +1,31 @@
+We have all agreed on these attributions:
+
+Ruihang Wang worked on :
+- (Baseline modeling) Helped build the full modeling and evaluation pipeline, including the 3-fold image-level cross-validation setup, training and testing for four classifiers, validation-based threshold tuning, and automatic generation of diagnostic plots such as ROC/PR curves, confusion matrices, spatial prediction maps, error maps, calibration curves, and feature importance plots.
+- (Autoencoder) Built the initial fully connected autoencoder in PyTorch Lightning, including configurable architecture presets, model training, and embedding extraction for all 164 images.
+- (Reproducibility) Set up the infrastructure needed for reproducible runs, including the unified SLURM submission script, the conda environment file, and configuration management. 
+- (Drafting modeling sections) Contributed to early drafts of the sections describing the autoencoder, the cross-validation design, and the numerical results.
+
+
+Rhea Zhang worked on:
+- (Pipeline) Connected feature engineering part into the basic autoencoder model, refined slurm pipeline, environment.yaml and fixed the ruff check
+- (Convolutional autoencoder & tuning)Built the convolutional autoencoder architecture and trained pipeline, including wandb hyperparameter sweep with 19 runs
+- (EDA) Copula dependency analysis (removed from final report for space)
+- (Advanced modeling) Advanced the classification process: CV, threshold tuning, ablation study, adaptive thresholding, and SHAP analysis
+- (Stability check) Stability analysis under PCS: bootstrap, noise injection, preprocessing perturbation, feature ranking stability
+- (Drafting results) Contributed to early drafts of the sections with updated tables and figures.
+
+
+Benjamin Khothsombath worked on:
+- (Feature engineering) Theorized and developed spatial features (patching expert-labeled features, mean-square rank difference, pooled mean-square rank difference, sobel gradient)
+- (Report writing) Report writing for introduction, EDA, feature engineering, and conclusion
+- (EDA/Data visualization) Iterated on earlier sections of the EDA and produced graphics for the feature engineering section
+- (Pipeline) Organized some data cleaning functions 
+
+
+Drew Galloro worked on:
+- (Report writing) Report writing for Modelling including model descriptions, cross-validation results, per-split breakdown, and best model selections.
+- (Report writing and reproducibility check) Wrote the Modeling Post-Hoc Analysis section including spatial error analysis and probability heatmap interpretation.
+- (Report refining) Edited first draft to remove redundancies and improve overall cohesion.
+- (Results analysis) Edited and analyzed modelling code outputs for interpretation in report.
+- (Proofreading) Copy editing for final formatting.
