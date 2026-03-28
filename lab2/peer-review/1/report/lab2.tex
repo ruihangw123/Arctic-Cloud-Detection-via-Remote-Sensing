@@ -1,0 +1,382 @@
+\documentclass[10pt,letterpaper]{article}
+\usepackage{geometry}
+\geometry{margin=1in}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{float}
+\usepackage{subcaption}
+
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.5em}
+
+%make lists tighter
+\usepackage{enumitem}
+\setlist{nolistsep}
+
+%reduce spacing before and after section
+\usepackage{titlesec}
+\usepackage{booktabs}
+% reduce section, subsection, etc spacing
+\usepackage{titlesec}
+\titlespacing*{\section}{0pt}{0\baselineskip}{0\baselineskip}
+\titlespacing*{\subsection}{0pt}{0\baselineskip}{0\baselineskip}
+\titlespacing*{\subsubsection}{0pt}{0\baselineskip}{0\baselineskip}
+
+%reduce list spacing
+\usepackage{enumitem}
+\setlist{nosep}
+
+\usepackage[hidelinks]{hyperref}
+
+\title{Lab 2 - Cloud Data, Stat 214, Spring 2025\vspace{-2em}}
+
+% submission must not contain any of your names
+% but feel free to make a version for yourself with your names on it
+% \author{Your names}
+
+\begin{document}
+\maketitle
+
+\section{Introduction}
+
+Cloud detection in polar regions is a fundamental challenge in remote sensing. While standard cloud detection algorithms rely on brightness thresholds, since clouds appear bright and surfaces appear dark, this is not necessarily true in the Artic, where sea ice and snow are equally bright and cold as clouds. Cloud classification is particularly relevant for climate modeling. 
+
+This report analyzes satellite imagery from the Multi-angle Imaging SpectroRadiometer (MISR), a sensor aboard NASA's Terra satellite that captures the same scene simultaneously from 9 camera angles. The key insight is that clouds and ice scatter light differently depending on viewing angle: ice scatters roughly uniformly across angles, while clouds scatter strongly in the forward direction. This angular variation is the physical signal that enables classification where simple brightness-based approaches fail.
+
+Our analysis proceeds in four stages. First, we perform exploratory data analysis to understand the structure of the data and the discriminative power of raw and engineered features. Second, we engineer additional features using an autoencoder to capture local spatial texture. Third, we train and evaluate classifiers for pixel-level cloud detection. Finally, we assess model stability through perturbation analysis and apply the classifier to unlabeled images as a qualitative sanity check.
+
+\subsection{Data}
+
+The dataset consists of three labeled MISR images of the same Arctic geographic region (path 26), collected during the 2002 Arctic daylight season. Each image corresponds to a distinct satellite overpass:
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{lll}
+\hline
+\textbf{Orbit} & \textbf{Approximate Date} & \textbf{Season} \\
+\hline
+O012791 & Late April / Early May & Spring \\
+O013257 & Late May / Early June & Spring \\
+O013490 & Mid June & Early Summer \\
+\hline
+\end{tabular}
+\caption{Orbit Dates and Corresponding Seasons}
+\label{tab:orbit_seasons}
+\end{table}
+
+Each pixel covers a $275\,\text{m} \times 275\,\text{m}$ patch and is recorded at the red band across five camera angles: DF ($70.5^\circ$), CF ($60^\circ$), BF ($45.6^\circ$), AF ($26.1^\circ$), and AN (nadir, $0^\circ$). The dataset contains approximately $345{,}000$ total pixels across the three images, of which $\sim 207{,}000$ carry expert labels ($+1$ cloud, $-1$ not cloud), with the remainder unlabeled ($0$) at ambiguous cloud boundaries.
+
+In additional to the raw angular radiances features, each pixel carries three engineered features derived from the angular radiances, designed to capture the physics of polar cloud-surface classification:
+
+\begin{itemize}
+    \item NDAI (Normalized Difference Angular Index): ratio comparing the most extreme forward camera (DF) to nadir (AN). Large positive values indicate strong forward scattering, a cloud signature.
+    \item SD: standard deviation of nadir radiance in a local neighborhood. Clouds produce higher texture variation than smooth ice.
+    \item CORR: average cross-angle correlation between camera pairs. High correlation indicates the same surface is seen from each angle (ice); low correlation indicates a cloud.
+\end{itemize}
+
+While the raw radiances are included as features, they provide limited discriminative power on their own: in the Arctic, both clouds and snow/ice surfaces are highly reflective, so brightness alone cannot reliably distinguish between them. The engineered features (NDAI, SD, CORR, etc.) are specifically designed to exploit angular variation rather than absolute brightness, and are the primary drivers of class separation.
+
+\section{EDA}
+
+\subsection{Spatial Structure of the Labeled Images}
+
+Figure~\ref{fig:labeled_images} shows the expert label maps for all three orbits. A few things stand out immediately. Clouds form large, spatially coherent regions rather than isolated pixels, neighboring pixels tend to share the same label, which matters for how we evaluate model performance. Unlabeled pixels cluster almost entirely at cloud edges, exactly where expert labelers were uncertain, so the ambiguity in the dataset has a clear geographic logic rather than being random noise. Finally, cloud coverage and arrangement shift meaningfully across the three orbits, reflecting the seasonal transition from spring to early summer over the same Arctic region.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{cloud_map_labeled.pdf}
+    \caption{Expert label maps for the three MISR orbits (O012791, O013257, O013490). Blue pixels are labeled cloud ($+1$), yellow are not-cloud ($-1$), and gray are unlabeled ($0$). Clouds form spatially coherent regions; unlabeled pixels concentrate at cloud-surface boundaries.}
+    \label{fig:labeled_images}
+\end{figure}
+
+\subsection{Data Quality}
+
+Before modeling, we verified the integrity of the dataset along several dimensions. There are no missing values, no physically invalid radiances (zero or negative), no correlation values outside $[-1, 1]$, and no duplicate pixel coordinates within any image. The data requires no imputation or structural repair.
+
+We identified outliers as pixels exceeding three standard deviations from the mean in at least one feature, amounting to 6.3\% of all pixels. Rather than being randomly scattered, these pixels cluster geographically in the lower-left region of the image grid, corresponding to the Greenland coastline, a region flagged by Shi et al. (2008) as problematic due to poor cross-angle terrain registration at sharp elevation changes. This geographic coherence indicates the outliers reflect genuine extreme surface conditions rather than sensor artifacts, so we retain all pixels, while noting that model performance may be lower in this coastal region.
+
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.65\textwidth]{outlier_spatial_combined.pdf}
+    \caption{Spatial distribution of outlier pixels (red), defined as exceeding $3\sigma$ in at least one of the eight features. Outliers cluster in the lower-left region of the image grid, consistent with the Greenland coastal terrain where poor cross-angle registration produces extreme feature values.}
+    \label{fig:outliers}
+\end{figure}
+
+
+\subsection{Feature Analysis: Radiances and Engineered Features}
+
+\subsubsection*{A. Correlations Among Raw Radiance Angles}
+
+Since all five cameras photograph the same scene simultaneously, their radiances are expected to be correlated. Figure~\ref{fig:corr_heatmap} confirms this: adjacent angles (e.g., AF and AN) are nearly perfectly correlated ($r = 0.97$), while the most geometrically separated pair (DF and AN) shows the weakest relationship ($r = 0.60$), still strongly positive, but with meaningful variation. This makes a lot of physical sense: nearby angles view nearly the same surface geometry, while more extreme angles begin to capture different scattering behavior.
+
+The high multicollinearity among raw radiances has practical consequences for modeling. In linear models, highly correlated features produce unstable coefficients that are difficult to interpret. More importantly, it means the five raw radiances do not carry five independent signals, much of their information overlaps. The engineered features are designed to extract the residual, physically meaningful variation that the correlations leave behind.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.55\textwidth]{radiance_correlation_heatmap.pdf}
+    \caption{Pearson correlation matrix of the five MISR radiance angles across all labeled pixels ($n \approx 345{,}000$). Correlations decrease monotonically with angular separation, from $r = 0.97$ (AF–AN) to $r = 0.60$ (DF–AN).}
+    \label{fig:corr_heatmap}
+\end{figure}
+
+\subsubsection*{B. Class Separation in Raw Radiances vs. Engineered Features}
+
+Figure~\ref{fig:distributions} shows the distribution of all eight features broken down by class. For raw radiances (DF through AN), the cloud and not-cloud distributions overlap heavily, confirming the Arctic brightness problem: brightness alone cannot reliably separate the two classes. The not-cloud class shows a notable bimodal structure across radiance angles, reflecting the surface heterogeneity within that category, one peak corresponds to bright, smooth sea ice, and another to darker exposed terrain such as rock or partially melted ice. Clouds, by contrast, form a single unimodal distribution. Notably, the direction of the class difference reverses across angles: at DF ($70.5^\circ$), clouds are slightly brighter, but at every other angle including nadir, not-cloud pixels are actually brighter on average. No single radiance value reliably indicates cloud presence.
+
+NDAI and SD tell a clearer story. For both features, not-cloud pixels concentrate in a single low-value peak, while cloud pixels shift toward higher values with broader spread. SD shows the most dramatic separation, cloud pixels have a mean value 4.4$\times$ higher than not-cloud. CORR is the exception among the engineered features: its distributions for cloud and not-cloud are nearly indistinguishable, consistent with its known limitation that it only reliably detects high-altitude clouds where cross-angle registration shifts are large enough to produce low correlation.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{feature_distributions_by_class.pdf}
+    \caption{KDE distributions of all eight features by class (cloud in blue, not-cloud in amber), pooled across all three images. Engineered features (left four panels) show substantially clearer class separation than raw radiances (right four panels).}
+    \label{fig:distributions}
+\end{figure}
+
+\subsubsection*{C. Joint Separation via NDAI and CORR}
+
+Figure~\ref{fig:ndai_corr} shows the joint density of NDAI and CORR for each class, reproducing the structure of Figure 10 in Shi et al. (2008). The two classes show distinct regions: cloud pixels concentrate at high NDAI and low CORR, while not-cloud pixels dominate the low NDAI and low CORR region. A simple threshold analysis confirms that NDAI is the primary discriminator, 66.6\% of cloud pixels have NDAI $\geq 0.20$ compared to only 4.7\% of not-cloud pixels. CORR provides secondary value within the low-NDAI zone by distinguishing smooth ice (high CORR) from rough terrain (low CORR), but cannot separate low-altitude clouds from the surface since they register similarly across angles.
+
+The overlap region at high CORR and high NDAI (roughly 10\% of cloud pixels, 3\% of not-cloud) represents the hardest classification cases, likely low-altitude clouds that both features fail to detect, a known limitation of this feature set acknowledged by Shi et al. (2008).
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.65\textwidth]{ndai_vs_corr_kde.pdf}
+    \caption{Joint density of NDAI and CORR by class. Dashed lines indicate the threshold ranges from Shi et al. (2008). Cloud pixels concentrate in the high-NDAI, low-CORR region; not-cloud pixels dominate the low-NDAI region regardless of CORR. The overlap at high CORR and high NDAI corresponds to low-altitude clouds that both features struggle to detect.}
+    \label{fig:ndai_corr}
+\end{figure}
+
+\subsection{Train/Test Split}
+
+With only three labeled images, the choice of split was challenging. A random pixel-level split would be inappropriate here: given the strong spatial correlation observed previously, where neighboring pixels almost always share the same label, randomly assigning pixels to train and test would artificially inflate performance by leaking spatial structure across the boundary.
+
+Instead, we adopt a temporal holdout strategy: we train on O012791 and O013257 (spring) and designate O013490 (early summer) as the held-out test set. This mirrors realistic deployment conditions, where a cloud detection algorithm is trained on historically labeled passes and applied to future ones it has never seen. We also included a 5-fold stratified CV on training data to preserve class proportions in each fold.
+
+This design comes with two limitations. First, with only three labeled images available, the entire test set comes from a single satellite pass. This means our performance estimate reflects one specific atmospheric condition on one specific day, so it is hard to know how well the number generalizes. Second, the training set covers a narrower seasonal window than the full April–September collection period, meaning the model may underperform in late summer when surface conditions differ, ice has partially melted, the solar elevation angle has changed, and surface brightness has shifted. The class distribution shift between training (33.2\% cloud) and test (47.8\% cloud) is itself evidence of this seasonal variation, and we account for it by using class-weighted models.
+
+
+\section{Feature Engineering}
+
+\subsection{Feature Importance}
+
+To identify the most informative features, we quantify class separation using three metrics computed across all labeled pixels: (1) \textbf{AUC}, the probability that a randomly chosen cloud pixel ranks higher than a randomly chosen not-cloud pixel; (2) the \textbf{KS statistic}, the maximum distance between the two class CDFs; and (3) \textbf{Mutual Information (MI)}, which captures any association between a feature and the label, including non-linear relationships.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{llccc}
+\hline
+\textbf{Rank} & \textbf{Feature} & \textbf{AUC} & \textbf{KS Stat} & \textbf{MI (bits)} \\
+\hline
+1 & SD   & 0.935 & 0.821 & 0.428 \\
+2 & NDAI & 0.823 & 0.621 & 0.259 \\
+3 & AF   & 0.799 & 0.466 & 0.202 \\
+4 & AN   & 0.794 & 0.452 & 0.196 \\
+5 & BF   & 0.770 & 0.445 & 0.170 \\
+6 & CF   & 0.643 & 0.285 & 0.087 \\
+7 & DF   & 0.554 & 0.237 & 0.124 \\
+8 & CORR & 0.524 & 0.058 & 0.010 \\
+\hline
+\end{tabular}
+\caption{Feature importance ranking across all labeled pixels ($n \approx 207{,}000$).}
+\label{tab:feature_importance}
+\end{table}
+
+\textbf{SD} ranks first across all three metrics (AUC $= 0.935$, KS $= 0.821$, MI $= 0.428$). Cloud pixels have a mean SD roughly 4.4$\times$ higher than not-cloud pixels, reflecting the textural contrast between rough cloud surfaces and smooth Arctic ice.
+
+\textbf{NDAI} ranks second (AUC $= 0.823$). It measures how much brighter the scene looks from the most extreme forward angle compared to straight down, a ratio that is large for clouds, which scatter light strongly forward, and near zero for flat ice surfaces. Together, SD and NDAI are by far the two strongest individual predictors in the dataset.
+
+\textbf{CORR} ranks last (AUC $= 0.524$), barely better than a coin flip as a standalone feature. This is surprising given that Shi et al. (2008) rely on it as a key component of their labeling rule, but the numbers are clear: NDAI alone achieves 84\% accuracy, while adding CORR's threshold rule on top does not improve it. The likely explanation is that CORR was designed to detect high-altitude clouds, where different camera angles photograph slightly offset parts of the cloud, but the labeled images appear to be dominated by low-altitude clouds, which look the same from all angles and fool CORR into thinking they are clear surfaces. We retain CORR in the feature set anyway, as a learned model may still find it useful in combination with other features even if it contributes little on its own.
+
+Based on this analysis, we identify \textbf{SD}, \textbf{NDAI}, and \textbf{AF} as the three most informative features. SD and NDAI are grounded in both domain knowledge and metrics. AF (AUC $= 0.799$) emerges as the strongest raw radiance angle, outperforming CORR across all three metrics and providing complementary brightness information not captured by the angular ratio features.
+
+\subsection{Feature Engineering}
+
+\subsubsection*{NDAI Variants}
+
+The original NDAI compares the most extreme forward camera (DF, $70.5^\circ$) to nadir (AN, $0^\circ$). We extended this idea to all angle pairs, computing normalized ratios of the form $(a - b)/(a + b)$ for five additional combinations. 
+
+Evaluated against the same AUC/KS/MI metrics, \textbf{NDAI-DF-AF}, comparing DF ($70.5^\circ$) to AF ($26.1^\circ$) instead of nadir, outperforms the original NDAI (AUC $0.833$ vs $0.823$). We attribute this to the nadir camera (AN) introducing reflectance noise at $0^\circ$ for smooth ice surfaces, while AF at $26.1^\circ$ provides a cleaner angular reference. At the other extreme, \textbf{NDAI-AF-AN} (AUC $\approx 0.500$) is effectively useless, confirming that wide angular separation is required for the ratio to carry classification signal. All remaining ratio variants are highly correlated with NDAI-DF-AF ($r > 0.89$) and offer no independent information, so only NDAI-DF-AF is retained.
+
+
+\begin{table}[H]
+\centering
+\begin{tabular}{llccc}
+\hline
+\textbf{Feature} & \textbf{Formula} & \textbf{AUC} & \textbf{KS} & \textbf{MI (bits)} \\
+\hline
+NDAI (original) & $(DF - AN)/(DF + AN)$ & 0.823 & 0.621 & 0.259 \\
+NDAI\_DF\_AF    & $(DF - AF)/(DF + AF)$ & \textbf{0.833} & \textbf{0.645} & \textbf{0.284} \\
+NDAI\_CF\_AF    & $(CF - AF)/(CF + AF)$ & 0.777 & 0.545 & 0.226 \\
+NDAI\_CF\_AN    & $(CF - AN)/(CF + AN)$ & 0.761 & 0.495 & 0.186 \\
+NDAI\_BF\_AN    & $(BF - AN)/(BF + AN)$ & 0.666 & 0.265 & 0.100 \\
+NDAI\_AF\_AN    & $(AF - AN)/(AF + AN)$ & 0.500 & 0.122 & 0.081 \\
+\hline
+\end{tabular}
+\caption{Comparison of NDAI ratio variants across three separability metrics. NDAI\_DF\_AF outperforms the original NDAI on all three metrics; NDAI\_AF\_AN is no better than chance.}
+\label{tab:ndai_variants}
+\end{table}
+
+
+\subsubsection*{PCA on Radiance Angles}
+
+The five raw radiances are highly multicollinear ($r = 0.60$--$0.97$). We applied PCA to the radiance block (fit on training data only, then applied to test) to decompose this redundancy. \textbf{PC1} captures $92\%$ of the variance and represents overall brightness, essentially a weighted average across all five cameras. \textbf{PC2} captures $6.5\%$ and closely mirrors NDAI: its loadings increase monotonically from AN ($-0.511$) to DF ($+0.727$), recovering the angular gradient from data rather than from domain knowledge. Despite this, PC2 (AUC $= 0.787$) is weaker than NDAI-DF-AF (AUC $= 0.833$) because the linear combination in PC2 is pulled toward the noisy nadir camera. We retain \textbf{PC1} as it captures overall brightness orthogonally to the ratio features; PC2 is dropped as it is superseded by NDAI-DF-AF.
+
+\subsubsection*{Final Feature Set}
+
+The final feature set consists of 9 features: SD, CORR, the five raw radiance angles (DF, CF, BF, AF, AN), NDAI-DF-AF, and PC1. We drop the original NDAI in favor of NDAI-DF-AF, which is both stronger empirically and backed by domain knowledge. Raw radiances are retained alongside PC1 because tree-based models can discover ratio-like splits directly from individual angle values without suffering from multicollinearity, unlike linear models. The autoencoder embeddings add a further 32 spatial context features, bringing the total to 41 features passed to the Modeling section. 
+
+\subsection{Transfer Learning}
+
+A major constraint in this problem is the limited amount of labeled data (only three images), compared to a much larger pool of unlabeled images (161 images). This naturally motivates a transfer learning approach: we first learn a general representation of the data using all available images, and then reuse this representation for downstream classification.
+
+\subsubsection*{Motivation}
+
+From the EDA, it is clear that cloud pixels are not independent. They form spatially coherent regions with distinct textures. However, all handcrafted features (e.g., NDAI, SD) are defined at the single-pixel level and ignore this spatial context.
+
+Learning spatial features directly from the labeled data is not feasible given the extremely limited sample size. Instead, we exploit the large set of unlabeled images and use an autoencoder to learn representations of local patches in an unsupervised way. This allows the model to capture patterns such as:
+\begin{itemize}
+    \item cloud texture (irregular, high-frequency variation),
+    \item smooth ice or snow surfaces,
+    \item transitions at cloud boundaries.
+\end{itemize}
+
+This design choice reflects a key trade-off: rather than relying purely on physics-inspired features, we allow the model to learn data-driven spatial structure that is otherwise difficult to hand-engineer.
+
+\subsubsection*{Design Choices and Practical Constraints}
+
+In principle, we could extract all possible patches from all images, but this would result in tens of millions of samples (on the order of tens of GB in memory), which is not practical even on most HPC setups.
+
+To address this, we randomly sample a fixed number of patches per image. We set this to 5000 patches per image, which was a practical compromise:
+\begin{itemize}
+    \item large enough to capture diverse spatial patterns within each image,
+    \item small enough to keep memory usage under $\sim$1GB,
+    \item fast enough to allow multiple experimental runs.
+\end{itemize}
+
+We experimented with smaller values (e.g., 2000), which were faster but produced slightly noisier embeddings (less stable across runs). Increasing beyond 5000 provided only marginal improvements while significantly increasing training time and memory overhead, so we settled on this value.
+
+From an implementation perspective, this sampling strategy was also important to avoid memory bottlenecks when constructing the dataset in PyTorch. Without subsampling, the patch extraction step alone becomes a major computational bottleneck.
+
+For efficiency, we used a two-stage workflow: local runs (with fewer patches and epochs) were used for debugging and architecture tuning, while the final training was conducted on an HPC environment with GPU acceleration. This allowed us to iterate quickly during development while still training a stable final model.
+
+\subsubsection*{Autoencoder Architecture}
+
+We train the autoencoder on $9 \times 9$ patches centered at each pixel. Each patch contains 8 channels (engineered features and radiances), resulting in an input dimension of $8 \times 9 \times 9 = 648$.
+
+The model consists of an encoder that maps the patch into a low-dimensional embedding, and a decoder that reconstructs the original patch from this embedding.
+
+We modified the baseline architecture provided in the starter code in several ways:
+
+\begin{itemize}
+    \item \textbf{Increased embedding dimension (8 $\rightarrow$ 32):}  
+    The original bottleneck compresses the input by a factor of $\sim$81$\times$, which we found too aggressive. In practice, this led to underfitting (high reconstruction error and overly smooth outputs). Increasing the embedding size to 32 significantly improved reconstruction quality while still enforcing meaningful compression.
+
+    \item \textbf{Convolutional structure:}  
+    Instead of fully flattening the input, we replaced parts of the encoder with convolutional layers to better exploit spatial locality. This required minor changes to the data pipeline (reshaping inputs to channel-first format) and yielded more stable training.
+
+    \item \textbf{Training stability tweaks:}  
+    We adjusted the learning rate ($5 \times 10^{-4}$) and added weight decay ($10^{-5}$) to stabilize training. We also monitored validation loss to implement early stopping, as we observed that training beyond convergence did not improve reconstruction.
+\end{itemize}
+
+The model is trained using mean squared reconstruction loss:
+\[
+\mathcal{L} = \|x - \hat{x}\|^2
+\]
+
+\subsubsection*{Training Behavior}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.65\textwidth]{Autoencoder Training Total Loss.png}
+    \caption{Autoencoder training curve (total loss). The rapid decrease in early epochs followed by a plateau indicates that the model efficiently learns dominant spatial structures and converges without overfitting.}
+    \label{fig:ae_training}
+\end{figure}
+
+Figure~\ref{fig:ae_training} shows the training dynamics of the autoencoder in terms of total loss. We observe three key patterns.
+
+\begin{itemize}
+    \item \textbf{Fast initial convergence}:
+    First, there is fast initial convergence. The loss decreases sharply within the first 5--10 epochs. This suggests that the model quickly captures the most salient structures in the data, such as overall brightness patterns and coarse spatial textures that distinguish cloud from non-cloud regions.
+    \item \textbf{Stable plateau}:
+    Second, the loss exhibits a stable plateau after approximately 15 epochs. This indicates that the model has largely saturated its representational capacity given the chosen architecture and embedding dimension. Additional training yields minimal improvement, implying that the learned latent representation has converged.
+
+    \item \textbf{Minimal overfitting}:
+    Third, there is minimal overfitting. The training and validation losses closely track each other throughout the training process. This suggests that the learned features generalize well across different images, which is particularly important given the limited number of labeled samples and the reliance on transfer learning.
+\end{itemize}
+
+Based on this behavior, we employ early stopping to prevent unnecessary training beyond convergence and to select the model checkpoint with the best validation performance. Overall, the training dynamics indicate that the autoencoder successfully learns a compact and stable representation of local spatial patterns, which can be leveraged as additional features for downstream classification.
+
+\subsubsection*{Feature Extraction and Transfer}
+
+After training, we discard the decoder and use the encoder to extract a 32-dimensional embedding for every pixel in both labeled and unlabeled images.
+
+From a practical standpoint, we precompute these embeddings and store them as additional features, rather than recomputing them on the fly during model training. This significantly reduces training time for downstream classifiers.
+
+These embeddings capture local spatial structure that is not available in single-pixel features, including:
+\begin{itemize}
+    \item texture variability (cloud vs. smooth ice),
+    \item edge structures at cloud boundaries,
+    \item consistency of multi-angle radiances within local neighborhoods.
+\end{itemize}
+
+We append these embeddings to the handcrafted feature set:
+\[
+\text{features} = \{\text{SD, CORR, radiances, NDAI\_DF\_AF, PC1}\} \cup \{\text{AE}_1, \dots, \text{AE}_{32}\}
+\]
+
+This results in a total of 41 features per pixel.
+
+\subsubsection*{Interpretation}
+
+This pipeline can be viewed as transfer learning in the following sense:
+\begin{itemize}
+    \item the autoencoder is pre-trained on a large unlabeled dataset to learn general spatial representations,
+    \item these representations are then transferred to the supervised classification task, where labeled data is limited.
+\end{itemize}
+
+Conceptually, the handcrafted features capture physics-based signals (angular scattering and variability), while the autoencoder captures data-driven spatial structure. These two sources of information are complementary, and together they help resolve challenging cases such as low-altitude clouds that resemble ice in radiance values but differ in local texture.
+
+We emphasize that the autoencoder is not optimized for classification performance directly, but rather for reconstructing the input distribution. Its usefulness is evaluated through downstream predictive performance. In Section 4, we evaluate the impact of these embeddings on classification performance.
+
+%----------------------
+%----- MODEL PART -----
+%----------------------
+\input{model.tex}
+%----------------------
+%---- END OF MODEL ----
+%----------------------
+
+\newpage
+\section{Bibliography}
+\begin{thebibliography}{1}
+
+\bibitem{shi2008}
+Shi, T., Yu, B., Clothiaux, E.~E., and Braverman, A.~J. (2008).
+\newblock Daytime {Arctic} cloud detection based on multi-angle satellite data with case studies.
+\newblock \textit{Journal of the American Statistical Association}, 103(482):584--597.
+
+\end{thebibliography}
+
+
+
+\appendix
+\section{Academic honesty}
+\subsection{Statement}
+The work in this report is our own and all the sources used are properly cited. Academic research honesty is important because science is built on truth.
+\subsection{LLM Usage}
+
+
+\subsubsection*{Coding}
+\begin{itemize}
+    \item Team member 1: I used Anthropic's Claude to understand better how to improve the autoencoder to make it work with less RAM, to suggest ways to ``prettify" some of the visuals from EDA (see figure 4 and 5) and for general documentation.
+    \item Team member 2: I used Gemini to brainstorm possible ways of implementing SVM and Regression models. I also used this model to polish my already-existing writings.
+    \item Team member 3:  I used ChatGPT to clean the code, create documentation, and brainstorm the method in order to improve the performance of the autoencoder based on image data.
+    \item Team member 4:  I used Claude Code to brainstorm ideas, create documentation, and help me plot figures.
+\end{itemize}
+
+\subsubsection*{Writing}
+\begin{itemize}
+    \item Used to find grammatical errors and LaTeX formatting (e.g. tables).
+\end{itemize}
+
+\end{document}

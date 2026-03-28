@@ -1,0 +1,71 @@
+data:
+  patch_size: 9
+  n_per_image: 5000
+  seed: 42
+  data_dir: "../data"
+
+dataloader_train:
+  batch_size: 1024
+  num_workers: 4
+  shuffle: True
+  pin_memory: True
+  persistent_workers: True
+
+dataloader_val:
+  batch_size: 1024
+  num_workers: 4
+  shuffle: False
+  pin_memory: True
+  persistent_workers: True
+
+autoencoder:
+  n_input_channels: 8
+  embedding_size: 32
+
+optimizer:
+  lr: 0.0005
+  weight_decay: 0.00001
+  sparse_lambda: 0.00001
+  use_scheduler: True
+  scheduler_factor: 0.5
+  scheduler_patience: 4
+
+trainer:
+  max_epochs: 50
+  log_every_n_steps: 50
+  accelerator: "auto"
+  devices: 1
+  precision: "16-mixed"
+
+checkpoint:
+  save_top_k: 1
+  monitor: "val_loss"
+  mode: "min"
+  filename: "ae_opt-best"
+  dirpath: "../results/checkpoints"
+
+# We turn wandb off when training
+wandb:
+  project: "lab2-autoencoder"
+  name: "ae_opt"
+
+split:
+  seed: 42
+  train_ratio: 0.8
+
+output:
+  stats_path: "../results/stats/ae_opt_stats.npz"
+  loss_history_path: "../results/stats/ae_opt_loss_history.csv"
+  pt_path: "../results/autoencoder_opt.pt"
+
+embedding:
+  output_dir: "../feature_eng_dataset"
+  batch_size: 2048
+
+feature_dataset:
+  output_dir: "../feature_eng_dataset"
+  test_image: "O013490"
+  labeled_images:
+    - "O013257"
+    - "O013490"
+    - "O012791"

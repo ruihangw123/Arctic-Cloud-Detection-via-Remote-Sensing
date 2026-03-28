@@ -1,0 +1,30 @@
+data:
+  patch_size: 9
+  max_images: 20  # only load 20 images locally (set to null for all 164)
+dataloader_train:
+  batch_size: 4096
+  num_workers: 0  # 0 is safer on Mac
+  shuffle: True
+dataloader_val:
+  batch_size: 4096
+  num_workers: 0
+  shuffle: False
+autoencoder:
+  n_input_channels: 8
+  embedding_size: 16  # increased from 8 to capture more info
+  use_conv: True       # use convolutional architecture
+optimizer:
+  lr: 0.0005
+trainer:
+  max_epochs: 30       # short for local testing
+  log_every_n_steps: 10
+  accelerator: 'cpu'   # force CPU on Mac
+checkpoint:
+  save_top_k: 3
+  monitor: 'val_loss'
+  mode: 'min'
+  filename: 'local-test-{epoch:03d}'
+  dirpath: 'checkpoints'
+wandb:
+  project: 'lab2-autoencoder'
+  name: 'local-test'

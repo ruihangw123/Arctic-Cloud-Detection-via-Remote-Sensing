@@ -1,0 +1,29 @@
+data:
+  patch_size: 9
+  max_images: null
+dataloader_train:
+  batch_size: 8192
+  num_workers: 0
+  shuffle: True
+dataloader_val:
+  batch_size: 8192
+  num_workers: 0
+  shuffle: False
+autoencoder:
+  n_input_channels: 8
+  embedding_size: 16
+  use_conv: True
+optimizer:
+  lr: 0.0005
+trainer:
+  max_epochs: 100
+  log_every_n_steps: 50
+checkpoint:
+  save_top_k: 3
+  monitor: 'val_loss'
+  mode: 'min'
+  filename: 'conv-ae-{epoch:03d}'
+  dirpath: 'checkpoints'
+wandb:
+  project: 'lab2-autoencoder'
+  name: 'conv-ae-full'

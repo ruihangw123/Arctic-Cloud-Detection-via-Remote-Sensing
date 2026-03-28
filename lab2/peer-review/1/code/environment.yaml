@@ -1,0 +1,20 @@
+name: stat214
+channels:
+  - defaults
+dependencies:
+  - python
+  - pip:
+    # ── original ──────────────────────────────────────────────────────────────
+    - numpy
+    - pandas
+    - matplotlib
+    - seaborn
+    - scikit-learn
+    - jupyterlab
+    - torch
+    # ── added ─────────────────────────────────────────────────────────────────
+    - lightning    # PyTorch Lightning — autoencoder training (run_autoencoder.py)
+    - scipy        # KS statistic (stats.ks_2samp) — feature importance metrics
+    - pyyaml       # load configs/default.yaml in run_autoencoder.py
+    - wandb        # experiment tracking logger in run_autoencoder.py
+    - tqdm         # progress bars in get_embedding.py
